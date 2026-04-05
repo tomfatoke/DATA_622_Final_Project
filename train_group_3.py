@@ -55,14 +55,16 @@ NUM_CLASSES = 3
 #  Hyperparameters 
 NUM_EPOCHS    = 25
 BATCH_SIZE    = 32
-LEARNING_RATE = 1e-3    # Used during warmup (head only)
-WARMUP_EPOCHS = 3       # Epochs before unfreezing backbone
-FINETUNE_LR   = 1e-5   # Lower LR after unfreezing
-PATIENCE      = 5       # Early stopping patience
+LEARNING_RATE = 1e-4    #only used for the warmup 
+WARMUP_EPOCHS = 5       #epochs before unfreezing the backbone
+FINETUNE_LR   = 1e-5   #LR after backbone unfrozen
+PATIENCE      = 5       #when to stop if there has been no improvement
 SEED          = 42
 
 DEVICE  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-USE_AMP = torch.cuda.is_available()
+if torch.cuda.is_available(): 
+    torch.backends.cudnn.benchmark = True
+USE_AMP = torch.cuda.is_available() 
 
 print(f"Device: {DEVICE}")
 print(f"Model will be saved to: {MODEL_SAVE_PATH}") 
@@ -78,4 +80,386 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 set_seed(SEED)
-print("Seeds set")
+print("Seeds set") 
+
+
+
+# ============================================================
+# METADATA HELPERS
+# Reading the CSV and maps rows to one of the three classes we have
+# ============================================================
+def normalize_text(x):
+    if pd.isna(x):
+        return None
+    return str(x).strip().lower()
+
+def derive_final_label(label, virus_category):
+    label     = normalize_text(label)
+    virus_cat = normalize_text(virus_category)
+    
+    # Handles common misspellings/variants
+    if label == "normal":
+        return "Normal"
+    if label in {"pnemonia", "pneumonia"}:
+        if virus_cat == "bacteria":
+            return "Pnemonia-Bacteria"
+        elif virus_cat == "virus":
+            return "Pnemonia-Virus"
+    return None  
+
+    #cleaning the data by turning non-strings into strings and removes accidental spaces before/after the text
+    #also applies final labels to the data based on the rules defined above
+def load_metadata(metadata_path):
+    df = pd.read_csv(metadata_path)
+    df["Dataset_type_norm"] = df["Dataset_type"].astype(str).str.strip().str.upper()
+    df["final_label"] = df.apply(
+        lambda row: derive_final_label(row["Label"], row["Label_1_Virus_category"]),
+        axis=1
+    )
+    return df
+#maps image filenames to their paths and loops through train/test one at a time 
+#also checks subfolders with rglob and image types like .png
+def build_image_path_lookup(train_dir, test_dir):
+    lookup = {}
+    for base_dir in [train_dir, test_dir]:
+        for p in Path(base_dir).rglob("*"):
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                lookup[p.name] = str(p)
+    return lookup
+
+print("Metadata helpers defined") 
+
+
+
+# ============================================================
+# DATASET CLASS
+# Loads images on demand and does not load everything into RAM
+# ============================================================
+class ChestXrayDataset(Dataset):
+    def __init__(self, metadata_df, dataset_type, class_names,
+                 train_dir, test_dir, transform=None):
+        self.transform    = transform
+        self.class_names  = class_names #saves class names
+        self.class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+        dataset_type      = dataset_type.upper()
+
+        image_lookup = build_image_path_lookup(train_dir, test_dir)
+        df = metadata_df[metadata_df["Dataset_type_norm"] == dataset_type].copy()
+
+        #holds image records and lets us know how many were skipped
+        self.rows = []
+        skipped   = 0
+
+        for _, row in df.iterrows():
+            final_label = row["final_label"]
+            image_name  = str(row["X_ray_image_name"]).strip()
+
+            if final_label is None:
+                skipped += 1
+                continue
+            image_path = image_lookup.get(image_name)
+            if image_path is None:
+                skipped += 1
+                continue
+
+            self.rows.append({
+                "image_name": image_name,
+                "image_path": image_path,
+                "label_name": final_label,
+                "label_idx":  self.class_to_idx[final_label],
+            })
+        #summary to verify the data loaded correctly
+        print(f"{dataset_type}: {len(self.rows)} images loaded, {skipped} skipped")
+
+    def __len__(self):
+        return len(self.rows)
+    #loading images in RGB because densenet161 requires 3 channels for colour input
+    def __getitem__(self, idx):
+        row   = self.rows[idx]
+        image = Image.open(row["image_path"]).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return image, row["label_idx"]
+
+print("Dataset class defined") 
+
+
+
+
+# ============================================================
+# TRANSFORMS
+# Training gets augmentation and the testing does not 
+# ============================================================
+
+#images pass through this transformation pipeline 
+train_transforms = transforms.Compose([ 
+    transforms.Resize((224, 224)), 
+    transforms.RandomHorizontalFlip(p=0.5), #randomly mirrors the image
+    transforms.RandomRotation(degrees=10), #Anywhere between 10 and 20 should work based on the transforms page
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1), #Not 100% sure if saturation and hue will improve the model but can remove it if necessary
+    transforms.ToTensor(), 
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                         std=[0.229, 0.224, 0.225])  #based on the documentation for transforms
+]) 
+
+test_transforms = transforms.Compose([ 
+    transforms.Resize((224, 224)), 
+    transforms.ToTensor(), 
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                         std=[0.229, 0.224, 0.225]) 
+]) 
+
+print("Transforms defined") 
+ 
+# ============================================================
+# LOADING DATA
+# This is to verify the paths are correct before we train the model
+# ============================================================
+
+metadata_df = load_metadata(METADATA_PATH) 
+
+train_dataset = ChestXrayDataset( 
+    metadata_df, "TRAIN", CLASS_NAMES, 
+    TRAIN_DIR, TEST_DIR, transform=train_transforms
+) 
+
+test_dataset = ChestXrayDataset( 
+    metadata_df, "TEST", CLASS_NAMES, 
+    TRAIN_DIR, TEST_DIR, transform=test_transforms
+) 
+
+train_loader = DataLoader( 
+    train_dataset, batch_size = BATCH_SIZE, 
+    shuffle = True, num_workers = 2, pin_memory = True
+) 
+
+test_loader = DataLoader( 
+    test_dataset, batch_size = BATCH_SIZE, 
+    shuffle = False, num_workers = 2, pin_memory = True #do not put shuffle = true fro the test for consistency in results
+) 
+
+#to verify the distribution of classes in the data 
+
+train_counts = Counter(row["label_name"] for row in train_dataset.rows)
+test_counts = Counter(row["label_name"] for row in test_dataset.rows)
+print(f"Train class counts: {dict(train_counts)}")
+print(f"Test class counts: {dict(test_counts)}")
+
+
+# ============================================================
+# MODEL SETUP
+# ============================================================
+
+def create_model(num_classes, device): 
+    model = models.densenet161(weights=DenseNet161_Weights.IMAGENET1K_V1)  #uses model pretrained weights for detecting edges, shapes etc etc
+
+    in_features = model.classifier.in_features 
+    model.classifier = nn.Linear(in_features, num_classes) #replaces final layer of 1000 with 3 for the xray classes
+
+    #only final classifying layer is used for training
+    for name, param in model.named_parameters(): 
+        if "classifier" not in name: 
+            param.requires_grad = False 
+        
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad) 
+    print(f"Trainable parameters: {trainable:} (backbone frozen)") 
+    return model.to(device) 
+
+def unfreeze_backbone(model, device): 
+    for param in model.parameters(): 
+        param.requires_grad = True 
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad) 
+    print(f"Backbone unfrozen, trainable parameters: {trainable:}") #to let us know the full number of params
+
+def compute_class_weights(dataset, num_classes, device): 
+    counts = Counter(row["label_idx"] for row in dataset.rows) 
+    total = sum(counts.values()) 
+    weights = [total / (num_classes * counts[i]) for i in range(num_classes)] #so the classes with fewer images will be rare and get a higher weighting
+    print(f"Class weights: {[round(w, 2) for w in weights]}") 
+    return torch.tensor(weights, dtype=torch.float).to(device) 
+
+model = create_model(NUM_CLASSES, DEVICE)
+class_weights = compute_class_weights(train_dataset, NUM_CLASSES, DEVICE)
+criterion = nn.CrossEntropyLoss(weight=class_weights)
+optimizer = optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=LEARNING_RATE
+) 
+
+scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6) 
+scaler = torch.amp.GradScaler("cuda") if USE_AMP else None 
+print("Model setup complete") 
+
+
+
+# ============================================================
+# TRAINING AND EVALUATION (to update weights/evaluate the model)
+# ============================================================
+def train_one_epoch(model, loader, optimizer, criterion, scaler, device):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total   = 0
+
+    pbar = tqdm(loader, desc="Training", leave=False) #just the progress bar for training
+    for inputs, labels in pbar:
+        inputs = inputs.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True) #clears gradients for each batch of 32
+
+        if USE_AMP:
+            with torch.amp.autocast("cuda"):
+                outputs = model(inputs)
+                loss    = criterion(outputs, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model(inputs)
+            loss    = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+        running_loss += loss.item() * inputs.size(0)
+        preds    = torch.argmax(outputs, dim=1)
+        correct += (preds == labels).sum().item()
+        total   += inputs.size(0)
+
+        pbar.set_postfix({"loss": f"{running_loss/total:.4f}",
+                          "acc":  f"{correct/total:.4f}"})
+
+    return running_loss / total, correct / total
+
+
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    running_loss = 0.0
+    all_labels, all_preds, all_probs = [], [], []
+
+    for inputs, labels in tqdm(loader, desc="Evaluating", leave=False):
+        inputs = inputs.to(device, non_blocking=True)
+        labels_device = labels.to(device)
+
+        
+        if USE_AMP:
+            with torch.amp.autocast("cuda"):
+                outputs = model(inputs)
+                loss    = criterion(outputs, labels_device)
+        else:
+            outputs = model(inputs)
+            loss    = criterion(outputs, labels_device)
+
+        running_loss += loss.item() * inputs.size(0)
+
+        probs = torch.softmax(outputs.float(), dim=1).cpu().numpy()
+        preds = np.argmax(probs, axis=1)
+
+        all_labels.extend(labels.numpy())
+        all_preds.extend(preds)
+        all_probs.extend(probs)
+
+    all_labels = np.array(all_labels)
+    all_preds  = np.array(all_preds)
+    all_probs  = np.array(all_probs)
+
+    accuracy  = accuracy_score(all_labels, all_preds)
+    auc       = roc_auc_score(all_labels, all_probs,
+                               multi_class="ovr", average="micro")
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels, all_preds, average="micro", zero_division=0
+    )
+
+    return {
+        "loss":      running_loss / len(all_labels),
+        "accuracy":  accuracy,
+        "auc":       auc,
+        "precision": precision,
+        "recall":    recall,
+        "f1":        f1
+    }
+
+print("Evaluate function defined")
+
+
+
+# ============================================================
+# FULL TRAINING LOOP
+# with an unfrozen backbone and early stopping based on validation loss 
+# This does the proper training necessary
+# ============================================================
+best_val_loss   = float("inf")
+best_model_wts  = copy.deepcopy(model.state_dict())
+epochs_no_improve = 0
+history = []
+
+
+print("training")
+print(f"Epochs: {NUM_EPOCHS} | Batch size: {BATCH_SIZE} | Device: {DEVICE}")
+
+
+for epoch in range(1, NUM_EPOCHS + 1):
+    epoch_start = time.time()
+
+    # TODO: learn to unfreeze backbone after warmup via torch documentation and add it at this indentation
+    if epoch == WARMUP_EPOCHS + 1:
+        print("\nWarmup complete — unfreezing backbone")
+        unfreeze_backbone(model, DEVICE)
+        optimizer = optim.Adam(model.parameters(), lr=FINETUNE_LR)
+        scheduler = CosineAnnealingLR(optimizer,
+                                      T_max=NUM_EPOCHS - WARMUP_EPOCHS,
+                                      eta_min=1e-8)
+
+    train_loss, train_acc = train_one_epoch(
+        model, train_loader, optimizer, criterion, scaler, DEVICE
+    )
+    val_metrics = evaluate(model, test_loader, criterion, DEVICE)
+    scheduler.step()
+    #how long it takes for each epoch 
+    epoch_time = time.time() - epoch_start
+    history.append({"epoch": epoch, **val_metrics})
+
+    print(
+        f"Epoch {epoch:02d}/{NUM_EPOCHS} | "
+        f"Train loss: {train_loss:.4f} acc: {train_acc:.4f} | "
+        f"Val loss: {val_metrics['loss']:.4f} "
+        f"acc: {val_metrics['accuracy']:.4f} "
+        f"auc: {val_metrics['auc']:.4f} | "
+        f"time: {epoch_time/60:.1f}min"
+    )
+
+    # need to save the best model based on val loss and add early stopping based on patience hyperparameter
+    if val_metrics["loss"] < best_val_loss:
+        best_val_loss = val_metrics["loss"]
+        best_model_wts = copy.deepcopy(model.state_dict())
+        torch.save(best_model_wts, MODEL_SAVE_PATH)
+        print(f"  -> Best model saved to {MODEL_SAVE_PATH}")
+        epochs_no_improve = 0
+    else:
+        epochs_no_improve += 1
+        print(f"  -> No improvement ({epochs_no_improve}/{PATIENCE})")
+        if epochs_no_improve >= PATIENCE:
+            print(f"\nEarly stopping at epoch {epoch}")
+            break
+
+print("\nTraining complete!") 
+
+
+# ============================================================
+# FINAL EVALUATION
+# Loading the best model and printing all of the necessary metrics
+# ============================================================
+model.load_state_dict(best_model_wts)
+final_metrics = evaluate(model, test_loader, criterion, DEVICE)
+
+print("\n" + "=" * 60)
+print("FINAL TEST SET PERFORMANCE")
+print("=" * 60)
+print(f"Accuracy:       {final_metrics['accuracy']:.4f}")
+print(f"Micro AUC:      {final_metrics['auc']:.4f}")
+print(f"Micro Precision:{final_metrics['precision']:.4f}")
+print(f"Micro Recall:   {final_metrics['recall']:.4f}")
+print(f"Micro F1:       {final_metrics['f1']:.4f}")
+print("=" * 60)
+print(f"Model saved at: {MODEL_SAVE_PATH}")
