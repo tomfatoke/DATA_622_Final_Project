@@ -96,14 +96,13 @@ def load_metadata(metadata_path):
         axis=1
     )
     return df
-#maps image filenames to their paths and loops through train one at a time
+#maps image filenames to their paths and loops through one at a time
 #also checks subfolders with rglob and image types like .png
-def build_image_path_lookup(train_dir):
+def build_image_path_lookup(base_dir):
     lookup = {}
-    for base_dir in [train_dir]:
-        for p in Path(base_dir).rglob("*"):
-            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                lookup[p.name] = str(p)
+    for p in Path(base_dir).rglob("*"):
+        if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+            lookup[p.name] = str(p)
     return lookup
 
 print("Metadata helpers defined") 
@@ -276,10 +275,8 @@ def main():
     best_val_loss   = float("inf")
     epochs_no_improve = 0
 
-
     print("training")
     print(f"Epochs: {NUM_EPOCHS} | Batch size: {BATCH_SIZE} | Device: {DEVICE}")
-
 
     for epoch in range(1, NUM_EPOCHS + 1):
         epoch_start = time.time()
