@@ -1,6 +1,7 @@
 #Using the densenet161 as it was the best model from the fast_model_screening file
 # IMPORTS
 import copy
+import tarfile
 import time
 import random
 import numpy as np
@@ -20,12 +21,6 @@ from tqdm.auto import tqdm
 import torchvision.models as models
 from torchvision.models import DenseNet161_Weights
 from torchvision import transforms
-
-from sklearn.metrics import (
-    accuracy_score,
-    roc_auc_score,
-    precision_recall_fscore_support
-)
 
 print("All imports successful")
 print(f"PyTorch version: {torch.__version__}")
@@ -164,8 +159,6 @@ class ChestXrayDataset(Dataset):
 print("Dataset class defined") 
 
 # TRANSFORMS
-# Training gets augmentation
-
 #images pass through this transformation pipeline 
 train_transforms = transforms.Compose([ 
     transforms.Resize((224, 224)), 
@@ -275,67 +268,13 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler, device):
 
     return running_loss / total, correct / total
 
-
-@torch.no_grad()
-def evaluate(model, loader, criterion, device):
-    model.eval()
-    running_loss = 0.0
-    all_labels, all_preds, all_probs = [], [], []
-
-    for inputs, labels in tqdm(loader, desc="Evaluating", leave=False):
-        inputs = inputs.to(device, non_blocking=True)
-        labels_device = labels.to(device)
-
-        
-        if USE_AMP:
-            with torch.amp.autocast("cuda"):
-                outputs = model(inputs)
-                loss    = criterion(outputs, labels_device)
-        else:
-            outputs = model(inputs)
-            loss    = criterion(outputs, labels_device)
-
-        running_loss += loss.item() * inputs.size(0)
-
-        probs = torch.softmax(outputs.float(), dim=1).cpu().numpy()
-        preds = np.argmax(probs, axis=1)
-
-        all_labels.extend(labels.numpy())
-        all_preds.extend(preds)
-        all_probs.extend(probs)
-
-    all_labels = np.array(all_labels)
-    all_preds  = np.array(all_preds)
-    all_probs  = np.array(all_probs)
-
-    accuracy  = accuracy_score(all_labels, all_preds)
-    auc       = roc_auc_score(all_labels, all_probs,
-                               multi_class="ovr", average="micro")
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        all_labels, all_preds, average="micro", zero_division=0
-    )
-
-    return {
-        "loss":      running_loss / len(all_labels),
-        "accuracy":  accuracy,
-        "auc":       auc,
-        "precision": precision,
-        "recall":    recall,
-        "f1":        f1
-    }
-
-print("Evaluate function defined")
-
-
 def main():
     global optimizer, scheduler
     # FULL TRAINING LOOP
     # with an unfrozen backbone and early stopping based on validation loss
     # This does the proper training necessary
     best_val_loss   = float("inf")
-    best_model_wts  = copy.deepcopy(model.state_dict())
     epochs_no_improve = 0
-    history = []
 
 
     print("training")
@@ -344,8 +283,6 @@ def main():
 
     for epoch in range(1, NUM_EPOCHS + 1):
         epoch_start = time.time()
-
-        # TODO: learn to unfreeze backbone after warmup via torch documentation and add it at this indentation
         if epoch == WARMUP_EPOCHS + 1:
             print("\nWarmup complete — unfreezing backbone")
             unfreeze_backbone(model, DEVICE)
@@ -357,31 +294,29 @@ def main():
         train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, DEVICE
         )
-        val_metrics = evaluate(model, criterion, DEVICE)
         scheduler.step()
         #how long it takes for each epoch
         epoch_time = time.time() - epoch_start
-        history.append({"epoch": epoch, **val_metrics})
 
         print(
             f"Epoch {epoch:02d}/{NUM_EPOCHS} | "
             f"Train loss: {train_loss:.4f} acc: {train_acc:.4f} | "
-            f"Val loss: {val_metrics['loss']:.4f} "
-            f"acc: {val_metrics['accuracy']:.4f} "
-            f"auc: {val_metrics['auc']:.4f} | "
             f"time: {epoch_time/60:.1f}min"
         )
 
         # need to save the best model based on val loss and add early stopping based on patience hyperparameter
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        if train_loss < best_val_loss:
+            best_val_loss = train_loss
             best_model_wts = copy.deepcopy(model.state_dict())
             torch.save(best_model_wts, MODEL_SAVE_PATH)
-            print(f"  -> Best model saved to {MODEL_SAVE_PATH}")
+            with tarfile.open(""+MODEL_SAVE_PATH+".tar.gz", "w:gz") as tar:
+                tar.add(MODEL_SAVE_PATH)
+            tar.close()
+            print(f" -> Best model saved to {MODEL_SAVE_PATH}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
-            print(f"  -> No improvement ({epochs_no_improve}/{PATIENCE})")
+            print(f" -> No improvement ({epochs_no_improve}/{PATIENCE})")
             if epochs_no_improve >= PATIENCE:
                 print(f"\nEarly stopping at epoch {epoch}")
                 break
