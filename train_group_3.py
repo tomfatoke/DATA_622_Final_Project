@@ -42,9 +42,8 @@ if torch.cuda.is_available():
 # ============================================================
 
 
-DATA_DIR        = "Coronahack-Chest-XRay-Dataset"
-TRAIN_DIR       = os.path.join(DATA_DIR, "train")
-TEST_DIR        = os.path.join(DATA_DIR, "test")
+TRAIN_DIR       = "./train"
+TEST_DIR        = "./test"
 METADATA_PATH   = "Chest_xray_Corona_Metadata.csv"
 MODEL_SAVE_PATH = "densenet161_best.pth"
 
@@ -383,83 +382,87 @@ def evaluate(model, loader, criterion, device):
 print("Evaluate function defined")
 
 
-
-# ============================================================
-# FULL TRAINING LOOP
-# with an unfrozen backbone and early stopping based on validation loss 
-# This does the proper training necessary
-# ============================================================
-best_val_loss   = float("inf")
-best_model_wts  = copy.deepcopy(model.state_dict())
-epochs_no_improve = 0
-history = []
-
-
-print("training")
-print(f"Epochs: {NUM_EPOCHS} | Batch size: {BATCH_SIZE} | Device: {DEVICE}")
+def main():
+    global optimizer, scheduler
+    # ============================================================
+    # FULL TRAINING LOOP
+    # with an unfrozen backbone and early stopping based on validation loss
+    # This does the proper training necessary
+    # ============================================================
+    best_val_loss   = float("inf")
+    best_model_wts  = copy.deepcopy(model.state_dict())
+    epochs_no_improve = 0
+    history = []
 
 
-for epoch in range(1, NUM_EPOCHS + 1):
-    epoch_start = time.time()
-
-    # TODO: learn to unfreeze backbone after warmup via torch documentation and add it at this indentation
-    if epoch == WARMUP_EPOCHS + 1:
-        print("\nWarmup complete — unfreezing backbone")
-        unfreeze_backbone(model, DEVICE)
-        optimizer = optim.Adam(model.parameters(), lr=FINETUNE_LR)
-        scheduler = CosineAnnealingLR(optimizer,
-                                      T_max=NUM_EPOCHS - WARMUP_EPOCHS,
-                                      eta_min=1e-8)
-
-    train_loss, train_acc = train_one_epoch(
-        model, train_loader, optimizer, criterion, scaler, DEVICE
-    )
-    val_metrics = evaluate(model, test_loader, criterion, DEVICE)
-    scheduler.step()
-    #how long it takes for each epoch 
-    epoch_time = time.time() - epoch_start
-    history.append({"epoch": epoch, **val_metrics})
-
-    print(
-        f"Epoch {epoch:02d}/{NUM_EPOCHS} | "
-        f"Train loss: {train_loss:.4f} acc: {train_acc:.4f} | "
-        f"Val loss: {val_metrics['loss']:.4f} "
-        f"acc: {val_metrics['accuracy']:.4f} "
-        f"auc: {val_metrics['auc']:.4f} | "
-        f"time: {epoch_time/60:.1f}min"
-    )
-
-    # need to save the best model based on val loss and add early stopping based on patience hyperparameter
-    if val_metrics["loss"] < best_val_loss:
-        best_val_loss = val_metrics["loss"]
-        best_model_wts = copy.deepcopy(model.state_dict())
-        torch.save(best_model_wts, MODEL_SAVE_PATH)
-        print(f"  -> Best model saved to {MODEL_SAVE_PATH}")
-        epochs_no_improve = 0
-    else:
-        epochs_no_improve += 1
-        print(f"  -> No improvement ({epochs_no_improve}/{PATIENCE})")
-        if epochs_no_improve >= PATIENCE:
-            print(f"\nEarly stopping at epoch {epoch}")
-            break
-
-print("\nTraining complete!") 
+    print("training")
+    print(f"Epochs: {NUM_EPOCHS} | Batch size: {BATCH_SIZE} | Device: {DEVICE}")
 
 
-# ============================================================
-# FINAL EVALUATION
-# Loading the best model and printing all of the necessary metrics
-# ============================================================
-model.load_state_dict(best_model_wts)
-final_metrics = evaluate(model, test_loader, criterion, DEVICE)
+    for epoch in range(1, NUM_EPOCHS + 1):
+        epoch_start = time.time()
 
-print("\n" + "=" * 60)
-print("FINAL TEST SET PERFORMANCE")
-print("=" * 60)
-print(f"Accuracy:       {final_metrics['accuracy']:.4f}")
-print(f"Micro AUC:      {final_metrics['auc']:.4f}")
-print(f"Micro Precision:{final_metrics['precision']:.4f}")
-print(f"Micro Recall:   {final_metrics['recall']:.4f}")
-print(f"Micro F1:       {final_metrics['f1']:.4f}")
-print("=" * 60)
-print(f"Model saved at: {MODEL_SAVE_PATH}")
+        # TODO: learn to unfreeze backbone after warmup via torch documentation and add it at this indentation
+        if epoch == WARMUP_EPOCHS + 1:
+            print("\nWarmup complete — unfreezing backbone")
+            unfreeze_backbone(model, DEVICE)
+            optimizer = optim.Adam(model.parameters(), lr=FINETUNE_LR)
+            scheduler = CosineAnnealingLR(optimizer,
+                                          T_max=NUM_EPOCHS - WARMUP_EPOCHS,
+                                          eta_min=1e-8)
+
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, optimizer, criterion, scaler, DEVICE
+        )
+        val_metrics = evaluate(model, test_loader, criterion, DEVICE)
+        scheduler.step()
+        #how long it takes for each epoch
+        epoch_time = time.time() - epoch_start
+        history.append({"epoch": epoch, **val_metrics})
+
+        print(
+            f"Epoch {epoch:02d}/{NUM_EPOCHS} | "
+            f"Train loss: {train_loss:.4f} acc: {train_acc:.4f} | "
+            f"Val loss: {val_metrics['loss']:.4f} "
+            f"acc: {val_metrics['accuracy']:.4f} "
+            f"auc: {val_metrics['auc']:.4f} | "
+            f"time: {epoch_time/60:.1f}min"
+        )
+
+        # need to save the best model based on val loss and add early stopping based on patience hyperparameter
+        if val_metrics["loss"] < best_val_loss:
+            best_val_loss = val_metrics["loss"]
+            best_model_wts = copy.deepcopy(model.state_dict())
+            torch.save(best_model_wts, MODEL_SAVE_PATH)
+            print(f"  -> Best model saved to {MODEL_SAVE_PATH}")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            print(f"  -> No improvement ({epochs_no_improve}/{PATIENCE})")
+            if epochs_no_improve >= PATIENCE:
+                print(f"\nEarly stopping at epoch {epoch}")
+                break
+
+    print("\nTraining complete!")
+
+
+    # ============================================================
+    # FINAL EVALUATION
+    # Loading the best model and printing all of the necessary metrics
+    # ============================================================
+    model.load_state_dict(best_model_wts)
+    final_metrics = evaluate(model, test_loader, criterion, DEVICE)
+
+    print("\n" + "=" * 60)
+    print("FINAL TEST SET PERFORMANCE")
+    print("=" * 60)
+    print(f"Accuracy:       {final_metrics['accuracy']:.4f}")
+    print(f"Micro AUC:      {final_metrics['auc']:.4f}")
+    print(f"Micro Precision:{final_metrics['precision']:.4f}")
+    print(f"Micro Recall:   {final_metrics['recall']:.4f}")
+    print(f"Micro F1:       {final_metrics['f1']:.4f}")
+    print("=" * 60)
+    print(f"Model saved at: {MODEL_SAVE_PATH}")
+
+if __name__ == "__main__":
+    main()
