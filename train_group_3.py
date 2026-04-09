@@ -1,8 +1,5 @@
 #Using the densenet161 as it was the best model from the fast_model_screening file
-# ============================================================
 # IMPORTS
-# ============================================================
-import os
 import copy
 import time
 import random
@@ -34,16 +31,10 @@ print("All imports successful")
 print(f"PyTorch version: {torch.__version__}")
 print(f"GPU available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}") 
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-
-# ============================================================
-# HYPERPARAMETERS
-# ============================================================
-
-
+# Set paths
 TRAIN_DIR       = "./train"
-TEST_DIR        = "./test"
 METADATA_PATH   = "Chest_xray_Corona_Metadata.csv"
 MODEL_SAVE_PATH = "densenet161_best.pth"
 
@@ -68,9 +59,7 @@ USE_AMP = torch.cuda.is_available()
 print(f"Device: {DEVICE}")
 print(f"Model will be saved to: {MODEL_SAVE_PATH}") 
 
-# ============================================================
 # REPRODUCIBILITY
-# ============================================================
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -81,12 +70,8 @@ def set_seed(seed):
 set_seed(SEED)
 print("Seeds set") 
 
-
-
-# ============================================================
 # METADATA HELPERS
 # Reading the CSV and maps rows to one of the three classes we have
-# ============================================================
 def normalize_text(x):
     if pd.isna(x):
         return None
@@ -106,8 +91,8 @@ def derive_final_label(label, virus_category):
             return "Pnemonia-Virus"
     return None  
 
-    #cleaning the data by turning non-strings into strings and removes accidental spaces before/after the text
-    #also applies final labels to the data based on the rules defined above
+#cleaning the data by turning non-strings into strings and removes accidental spaces before/after the text
+#also applies final labels to the data based on the rules defined above
 def load_metadata(metadata_path):
     df = pd.read_csv(metadata_path)
     df["Dataset_type_norm"] = df["Dataset_type"].astype(str).str.strip().str.upper()
@@ -116,11 +101,11 @@ def load_metadata(metadata_path):
         axis=1
     )
     return df
-#maps image filenames to their paths and loops through train/test one at a time 
+#maps image filenames to their paths and loops through train one at a time
 #also checks subfolders with rglob and image types like .png
-def build_image_path_lookup(train_dir, test_dir):
+def build_image_path_lookup(train_dir):
     lookup = {}
-    for base_dir in [train_dir, test_dir]:
+    for base_dir in [train_dir]:
         for p in Path(base_dir).rglob("*"):
             if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                 lookup[p.name] = str(p)
@@ -128,21 +113,17 @@ def build_image_path_lookup(train_dir, test_dir):
 
 print("Metadata helpers defined") 
 
-
-
-# ============================================================
 # DATASET CLASS
 # Loads images on demand and does not load everything into RAM
-# ============================================================
 class ChestXrayDataset(Dataset):
     def __init__(self, metadata_df, dataset_type, class_names,
-                 train_dir, test_dir, transform=None):
+                 train_dir, transform=None):
         self.transform    = transform
         self.class_names  = class_names #saves class names
         self.class_to_idx = {name: idx for idx, name in enumerate(class_names)}
         dataset_type      = dataset_type.upper()
 
-        image_lookup = build_image_path_lookup(train_dir, test_dir)
+        image_lookup = build_image_path_lookup(train_dir)
         df = metadata_df[metadata_df["Dataset_type_norm"] == dataset_type].copy()
 
         #holds image records and lets us know how many were skipped
@@ -182,13 +163,8 @@ class ChestXrayDataset(Dataset):
 
 print("Dataset class defined") 
 
-
-
-
-# ============================================================
 # TRANSFORMS
-# Training gets augmentation and the testing does not 
-# ============================================================
+# Training gets augmentation
 
 #images pass through this transformation pipeline 
 train_transforms = transforms.Compose([ 
@@ -199,56 +175,29 @@ train_transforms = transforms.Compose([
     transforms.ToTensor(), 
     transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                          std=[0.229, 0.224, 0.225])  #based on the documentation for transforms
-]) 
-
-test_transforms = transforms.Compose([ 
-    transforms.Resize((224, 224)), 
-    transforms.ToTensor(), 
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                         std=[0.229, 0.224, 0.225]) 
-]) 
+])
 
 print("Transforms defined") 
- 
-# ============================================================
+
 # LOADING DATA
 # This is to verify the paths are correct before we train the model
-# ============================================================
-
 metadata_df = load_metadata(METADATA_PATH) 
 
 train_dataset = ChestXrayDataset( 
     metadata_df, "TRAIN", CLASS_NAMES, 
-    TRAIN_DIR, TEST_DIR, transform=train_transforms
-) 
-
-test_dataset = ChestXrayDataset( 
-    metadata_df, "TEST", CLASS_NAMES, 
-    TRAIN_DIR, TEST_DIR, transform=test_transforms
-) 
+    TRAIN_DIR, transform=train_transforms
+)
 
 train_loader = DataLoader( 
     train_dataset, batch_size = BATCH_SIZE, 
     shuffle = True, num_workers = 2, pin_memory = True
-) 
+)
 
-test_loader = DataLoader( 
-    test_dataset, batch_size = BATCH_SIZE, 
-    shuffle = False, num_workers = 2, pin_memory = True #do not put shuffle = true fro the test for consistency in results
-) 
-
-#to verify the distribution of classes in the data 
-
+#to verify the distribution of classes in the data
 train_counts = Counter(row["label_name"] for row in train_dataset.rows)
-test_counts = Counter(row["label_name"] for row in test_dataset.rows)
 print(f"Train class counts: {dict(train_counts)}")
-print(f"Test class counts: {dict(test_counts)}")
 
-
-# ============================================================
 # MODEL SETUP
-# ============================================================
-
 def create_model(num_classes, device): 
     model = models.densenet161(weights=DenseNet161_Weights.IMAGENET1K_V1)  #uses model pretrained weights for detecting edges, shapes etc etc
 
@@ -289,11 +238,7 @@ scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
 scaler = torch.amp.GradScaler("cuda") if USE_AMP else None 
 print("Model setup complete") 
 
-
-
-# ============================================================
-# TRAINING AND EVALUATION (to update weights/evaluate the model)
-# ============================================================
+# TRAINING (to update weights)
 def train_one_epoch(model, loader, optimizer, criterion, scaler, device):
     model.train()
     running_loss = 0.0
@@ -384,11 +329,9 @@ print("Evaluate function defined")
 
 def main():
     global optimizer, scheduler
-    # ============================================================
     # FULL TRAINING LOOP
     # with an unfrozen backbone and early stopping based on validation loss
     # This does the proper training necessary
-    # ============================================================
     best_val_loss   = float("inf")
     best_model_wts  = copy.deepcopy(model.state_dict())
     epochs_no_improve = 0
@@ -414,7 +357,7 @@ def main():
         train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, DEVICE
         )
-        val_metrics = evaluate(model, test_loader, criterion, DEVICE)
+        val_metrics = evaluate(model, criterion, DEVICE)
         scheduler.step()
         #how long it takes for each epoch
         epoch_time = time.time() - epoch_start
@@ -444,25 +387,6 @@ def main():
                 break
 
     print("\nTraining complete!")
-
-
-    # ============================================================
-    # FINAL EVALUATION
-    # Loading the best model and printing all of the necessary metrics
-    # ============================================================
-    model.load_state_dict(best_model_wts)
-    final_metrics = evaluate(model, test_loader, criterion, DEVICE)
-
-    print("\n" + "=" * 60)
-    print("FINAL TEST SET PERFORMANCE")
-    print("=" * 60)
-    print(f"Accuracy:       {final_metrics['accuracy']:.4f}")
-    print(f"Micro AUC:      {final_metrics['auc']:.4f}")
-    print(f"Micro Precision:{final_metrics['precision']:.4f}")
-    print(f"Micro Recall:   {final_metrics['recall']:.4f}")
-    print(f"Micro F1:       {final_metrics['f1']:.4f}")
-    print("=" * 60)
-    print(f"Model saved at: {MODEL_SAVE_PATH}")
 
 if __name__ == "__main__":
     main()
