@@ -190,6 +190,6 @@ The dataset is based on the [Chest X-Ray Images (Pneumonia)](https://www.kaggle.
 | Member             | Contribution                                                                                    |
 |--------------------|-------------------------------------------------------------------------------------------------|
 | Abdallah Elshafey  | Report writing and code review                                                                  |
-| Josh Brauner       | Pretrained model screening, final model selection, code cleanup, classification and training    |
-| Tom Fatoke         | Model training setup, report drafting, filling in training details                              |
+| Josh Brauner       | Pretrained model screening, final model selection, code cleanup for classification and training    |
+| Tom Fatoke         | Model training setup and initial hyperparameter tuning, report drafting, filling in training details                              |
 | Toheeb Ayuba       | Hyperparameter tuning experiments, class weighting implementation, final report preparation     |
